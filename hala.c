@@ -14,7 +14,7 @@
 
 //global variables are for smooth operation between the split processes in both the client and the server sides
 md3_net_socket_t remote_socket;
-char IncomingMailFileName[256];
+char IncomingMailFileName[256] = {};
 pid_t parentpid, pid;
 bool Writing=false; //for the process to know that the client is currently typing an email
 
@@ -24,8 +24,11 @@ typedef struct {
     char szFromAddr[64];
     char szSubject[64];
     time_t tTimeStamp;
+    size_t bAttachFile;
     char szContent[256];
 } T_SmtpMessage;
+
+#define MAX_ATTACH_FILE_SIZE    (1 << 16)
 
 typedef struct {
     char szFileName[64];
@@ -68,21 +71,35 @@ void sighand(int signum){ //signal handler. prompts a server process to send an 
     FILE *IncomingMailFile;
     IncomingMailFile=fopen(IncomingMailFileName, "r"); //opens the file containing the emails addressed to the connected client for reading
     if (IncomingMailFile!=NULL){ //just checks if the opening was successful
-        char * line = NULL;
+        /*char * line = NULL;
         size_t len = 0;
         while (getline(&line, &len, IncomingMailFile) != -1) {
             strcat(next, line);
+        }*/
+        T_SmtpMessage tSmtpMessage = {};
+        if (1 == fread(&tSmtpMessage, sizeof(tSmtpMessage), 1, IncomingMailFile)) {
+            md3_net_tcp_socket_send(&remote_socket, &tSmtpMessage, sizeof(tSmtpMessage)); 
+            if (tSmtpMessage.bAttachFile) {
+                T_AttachmentFile tAttachFile = {};
+                if (1 == fread(&tAttachFile, sizeof(tAttachFile), 1, IncomingMailFile)) {
+                    char* szAttachContent = calloc(tAttachFile.dwFileSize, 1);
+                    if (tAttachFile.dwFileSize == fread(szAttachContent, 1, tAttachFile.dwFileSize, IncomingMailFile)) {
+                        md3_net_tcp_socket_send(&remote_socket, &tAttachFile, sizeof(tAttachFile)); 
+                        md3_net_tcp_socket_send(&remote_socket, szAttachContent, tAttachFile.dwFileSize); 
+                    }
+                }
+            }
         }
         fclose(IncomingMailFile);
         //^^^ iterates over the lines in the file and adds them to a single string to send to the connected client
-        if (strcmp(next, "")!=0) md3_net_tcp_socket_send(&remote_socket, next, sizeof(next)); //checks if the email is actually empty or not, will not send if there is nothing there
+        //if (strcmp(next, "")!=0) md3_net_tcp_socket_send(&remote_socket, next, sizeof(next)); //checks if the email is actually empty or not, will not send if there is nothing there
         // delete old mail file.
         IncomingMailFile=fopen(IncomingMailFileName, "w");
         fclose(IncomingMailFile);
         unlink(IncomingMailFileName);
         //^^^ clears the email file once the email inside is sent to the client.
     }
-    else printf("Error openeing file\n");
+    else printf("Error openeing file: %s\n", IncomingMailFileName);
 }
 int MailExtensionChecker(char* input){
     char checker[256];
@@ -119,7 +136,7 @@ int run_server(unsigned short port) {
     host=md3_net_host_to_str(remote_addr.host);
 	printf("Accepted connection from %s:%d\n", host, remote_addr.port);
 
-    char ClientEmail[256];
+    char ClientEmail[256] = {};
     md3_net_tcp_socket_receive(&remote_socket, &ClientEmail, sizeof(ClientEmail)); //this line is dedicated to receiving the client email that the client chose, and the server stores it in the directory and assigns it to the connected client
     printf("-----Assigned %s to %s\n",ClientEmail, host);
     ///
@@ -131,7 +148,7 @@ int run_server(unsigned short port) {
     fclose(Directory);
     ///^^ stores the connected clients email in the directory file after converting it to lowercase. lowercase conversion is for the sake of comparisons when validating the emails
     strcpy(IncomingMailFileName, ClientEmail); //copies the email into another string
-    strcat(IncomingMailFileName, ".txt"); //appends .txt to the email, this is for definig which file the server should open to accept and forward emails directed to its own connected client
+    strcat(IncomingMailFileName, ".bin"); //appends .txt to the email, this is for definig which file the server should open to accept and forward emails directed to its own connected client
 
 //  char incomingMail[4][256];
     pid_t target;
@@ -144,6 +161,8 @@ int run_server(unsigned short port) {
     //^^^ if and else statements above are to set the target process for the signals that will be sent in later parts.
     while (1) {
         T_SmtpMessage tRecvSmtpMessage = {};
+        T_AttachmentFile tRecvAttachFile = {};
+        char* szAttachContent = NULL;
         bool error=false, found=false; //found is for validating the email the connected client is trying to send to
         int received;
 /*      for (int i=0; i<4; i++) {
@@ -157,6 +176,15 @@ int run_server(unsigned short port) {
         if (strcmp(tRecvSmtpMessage.szToAddr, "=end=\0")==0) goto Done; //the client can choose to end the connection, which will send a message to the server. the server receives the message and acts accordingly
         if (received == 0) continue;
         if (received != sizeof(tRecvSmtpMessage)) error=true;
+        if (tRecvSmtpMessage.bAttachFile) {
+            received = md3_net_tcp_socket_receive(&remote_socket, &tRecvAttachFile, sizeof(tRecvAttachFile));
+            //printf("tRecvAttachFile, %d == %d\n", sizeof(tRecvAttachFile), received);
+            if (received != sizeof(tRecvAttachFile)) error = true;
+            szAttachContent = calloc(tRecvAttachFile.dwFileSize, sizeof(char));
+            received = md3_net_tcp_socket_receive(&remote_socket, szAttachContent, tRecvAttachFile.dwFileSize);
+            //printf("attach content, %d == %d\n", tRecvAttachFile.dwFileSize, received);
+            if (received != (tRecvAttachFile.dwFileSize)) error = true;
+        }
         if (!error) {
 //          EmailLen=strlen(incomingMail[0]); //incomingMail[0] represents the TO field of the email
 //          for (int i=0; i<EmailLen; i++) incomingMail[0][i]=tolower((unsigned char) incomingMail[0][i]); //loop converts it to lower case for validating
@@ -177,17 +205,21 @@ int run_server(unsigned short port) {
             fclose(Directory);
             //^^^ validates the email in the TO field, if it is within the server directory then proceed normally. otherwise the found boolean with remain false, and an error message is sent back to the connected client instead
             if (!found) goto Error;
+            if (MailExtensionChecker(tRecvSmtpMessage.szToAddr) == 0 || MailExtensionChecker(tRecvSmtpMessage.szFromAddr) == 0) {
+                error = 1;
+                goto Error;
+            }
             char mailcheck[256] = {};
 //          strcpy(mailcheck, incomingMail[0]); //copies the email in the TO field into another string
             strcpy(mailcheck, tRecvSmtpMessage.szToAddr); //copies the email in the TO field into another string
-            strcat(mailcheck, ".txt"); //appends .txt to the email, this is to define which file to store the email into, to be forwarded by the server process connected to the second client
+            strcat(mailcheck, ".bin"); //appends .txt to the email, this is to define which file to store the email into, to be forwarded by the server process connected to the second client
             md3_net_tcp_socket_send(&remote_socket, "250 OK\0", 7); //at this point in the code the server has successfully received the email from its connected client. so it send a confirmation message
             Sender = fopen(mailcheck, "w"); //opens the file mentioned 2 lines ago for writing. if it does not exist then it will be created
 /*          fprintf(Sender, "FROM: %s\n", incomingMail[1]);
             fprintf(Sender, "TO: %s\n", incomingMail[0]);
             fprintf(Sender, "SUBJECT: %s\n", incomingMail[2]);
             fprintf(Sender, "BODY: %s\n", incomingMail[3]);
-*/          fprintf(Sender, "FROM: %s\n", tRecvSmtpMessage.szFromAddr);
+            fprintf(Sender, "FROM: %s\n", tRecvSmtpMessage.szFromAddr);
             fprintf(Sender, "TO: %s\n", tRecvSmtpMessage.szToAddr);
             fprintf(Sender, "SUBJECT: %s\n", tRecvSmtpMessage.szSubject);
             fprintf(Sender, "BODY: %s\n", tRecvSmtpMessage.szContent);
@@ -195,9 +227,16 @@ int run_server(unsigned short port) {
             char *timestamp=timeStamp(tNow);
             printf("Email received at server from %s at %s\n", host, timestamp);
             fprintf(Sender, "TIME: %s\n", timeStamp(tRecvSmtpMessage.tTimeStamp));
+*/
+            fwrite(&tRecvSmtpMessage, sizeof(tRecvSmtpMessage), 1, Sender);
+            if (tRecvSmtpMessage.bAttachFile) {
+                fwrite(&tRecvAttachFile, sizeof(tRecvAttachFile), 1, Sender);
+                fwrite(szAttachContent, tRecvAttachFile.dwFileSize, 1, Sender);
+            }
             fclose(Sender);
             //^^^ saves the email into the file
             printf("Echoing...\n");
+            sleep(1);
 //          if(strcmp(incomingMail[0], ClientEmail)==0) kill(getpid(), SIGUSR1); //special case when the TO field contains the email of the sender
             if(strcmp(tRecvSmtpMessage.szToAddr, ClientEmail)==0) kill(getpid(), SIGUSR1); //special case when the TO field contains the email of the sender
             else kill(target, SIGUSR1); //sends signal to the server process connected to the second client to forward the email that was sent by the first client
@@ -266,16 +305,16 @@ int run_client(const char *host, unsigned short port) {
     char szInboxPath[256] = {};
     snprintf(szInboxPath, 255, "%s/inbox", ClientEmail);
     memset(&st, 0, sizeof(st));
-    printf("szInboxPath = %s\n", szInboxPath);
-    printf("%d\n", stat(szInboxPath, &st));
+    //printf("szInboxPath = %s\n", szInboxPath);
+    //printf("%d\n", stat(szInboxPath, &st));
     if (stat(szInboxPath, &st) == -1) {
         mkdir(szInboxPath, 0777);
     }
     memset(&st, 0, sizeof(st));
     char szOutboxPath[256] = {};
     snprintf(szOutboxPath, 255, "%s/outbox", ClientEmail);
-    printf("szOutboxPath = %s\n", szInboxPath);
-    printf("%d\n", stat(szOutboxPath, &st));
+    //printf("szOutboxPath = %s\n", szInboxPath);
+    //printf("%d\n", stat(szOutboxPath, &st));
     if (stat(szOutboxPath, &st) == -1) {
         mkdir(szOutboxPath, 0777);
     }
@@ -334,6 +373,62 @@ int run_client(const char *host, unsigned short port) {
                 time_t tTimeStamp = time(NULL);
                 tSmtpMessage.tTimeStamp = tTimeStamp;
                 snprintf(szMailTextPath, 255, "%s/%s_%ld.txt", szOutboxPath, tSmtpMessage.szSubject, tTimeStamp);
+
+                char szAttachFilePath[256] = {};
+                FILE* fAttachFile = NULL;
+                size_t dwAttachFileSize = 0;
+                do {
+                    printf("Attach file: (press enter if you want to skip.)\n");
+                    fgets(szAttachFilePath, _countof(szAttachFilePath) - 1, stdin);
+                    if (szAttachFilePath[strlen(szAttachFilePath) - 1] == '\n') {
+                        szAttachFilePath[strlen(szAttachFilePath) - 1] = '\0';
+                    }
+                    if (strlen(szAttachFilePath) == 0) {
+                        tSmtpMessage.bAttachFile = false;
+                        break;
+                    } else {
+                        if (-1 == stat(szAttachFilePath, &st))
+                            continue;
+                        dwAttachFileSize = st.st_size;
+                        if (MAX_ATTACH_FILE_SIZE <= dwAttachFileSize) {
+                            printf("Attach file size must be smaller than %d kilobytes\n", MAX_ATTACH_FILE_SIZE / 1024);
+                            continue;
+                        }
+                        fAttachFile = fopen(szAttachFilePath, "r");
+                        if (NULL == fAttachFile)
+                            continue;
+                        tSmtpMessage.bAttachFile = true;
+                        break;
+                    }
+                } while (1);
+
+                char *szAttachFileContent = NULL;
+                T_AttachmentFile tAttachFile = {};
+                if (tSmtpMessage.bAttachFile && fAttachFile) {
+                    char szAttachSaveFilePath[256] = {};
+                    char szAttachExtension[16] = {};
+                    char* szTemp = strrchr(szAttachFilePath, '.');
+                    if (szTemp) {
+                        strncpy(szAttachExtension, szTemp + 1, _countof(szAttachExtension) - 1);
+                        strncpy(tAttachFile.szExtension, szAttachExtension, _countof(tAttachFile.szExtension) - 1);
+                        *szTemp = 0;
+                        strncpy(tAttachFile.szFileName, szAttachFilePath, _countof(tAttachFile.szFileName) - 1);
+                    } else {
+                        //
+                    }
+                    snprintf(szAttachSaveFilePath, 255, "%s/%s_%ld_attach.%s", szOutboxPath, tSmtpMessage.szSubject, tTimeStamp, szAttachExtension);
+                    outboxFile=fopen(szAttachSaveFilePath, "a");
+                    if (outboxFile) {
+                        szAttachFileContent = calloc(dwAttachFileSize, sizeof(char));
+                        if (NULL != szAttachFileContent)
+                        if (dwAttachFileSize == fread(szAttachFileContent, sizeof(char), dwAttachFileSize, fAttachFile)) {
+                            fwrite(szAttachFileContent, sizeof(char), dwAttachFileSize, outboxFile);
+                            tAttachFile.dwFileSize = dwAttachFileSize;
+                        }
+                        fclose(outboxFile);
+                    }
+                    fclose(fAttachFile);
+                }
                 outboxFile=fopen(szMailTextPath, "a");
                 if (NULL != outboxFile) {
 /*                  fprintf(outboxFile, "FROM: %s\n", email[1]);
@@ -345,6 +440,7 @@ int run_client(const char *host, unsigned short port) {
                     fprintf(outboxFile, "TO: %s\n", tSmtpMessage.szToAddr);
                     fprintf(outboxFile, "SUBJECT: %s\n", tSmtpMessage.szSubject);
                     fprintf(outboxFile, "BODY: %s\n", tSmtpMessage.szContent);
+                    if (tSmtpMessage.bAttachFile) fprintf(outboxFile, "ATTACH: one %s file attached\n", tAttachFile.szExtension);
                     fprintf(outboxFile, "TIME: %s\n", timeStamp(tTimeStamp));
                     fclose(outboxFile);
                 }
@@ -353,8 +449,16 @@ int run_client(const char *host, unsigned short port) {
                     md3_net_tcp_socket_send(&socket, email[i], sizeof(email[i]));
                 } //loop sends all the fields of the email to the server
 */
-                md3_net_tcp_socket_send(&socket, &tSmtpMessage, sizeof(tSmtpMessage));
-                printf("\n////Sending...\n");
+                if (0 == md3_net_tcp_socket_send(&socket, &tSmtpMessage, sizeof(tSmtpMessage))) {
+                    printf("\nEmail has been sent to the server.\n");
+                }
+                if (tSmtpMessage.bAttachFile) {
+                    if ((0 == md3_net_tcp_socket_send(&socket, &tAttachFile, sizeof(tAttachFile))) &&
+                        (0 == md3_net_tcp_socket_send(&socket, szAttachFileContent, dwAttachFileSize))) {
+                        printf("\nEmail has been sent to the server.\n");
+                    }
+                    free(szAttachFileContent);
+                }
                 kill(pid, SIGCONT); //sends a signal to the receiving process that the user has stopped writing, and allows it to continue listening
                 sleep(1);
                 kill(pid, SIGUSR2); //forcibly notifies the receiving process that the user has stopped writing by setting the Writing boolean to false
@@ -385,20 +489,22 @@ int run_client(const char *host, unsigned short port) {
     else { //child process after split will be used for receiving
         bool error=false;
         int received, OK, ERROR, MAILERROR;
-        char Inbox[1024], Backlog[2048];
+        char /*Inbox[1024], */Backlog[2048];
         memset(Backlog, 0, strlen(Backlog)); //zeros out the backlog after creating the string so problems do not appear
         while(1){
-            memset(Inbox, 0, strlen(Inbox)); //clears the inbox string after each iteration
-            received = md3_net_tcp_socket_receive(&socket, &Inbox, sizeof(Inbox)); //when receiving, the emails are received in one full string rather than separated fields as is the case when sending
+            T_SmtpMessage tSmtpMessage = {};
+//          memset(Inbox, 0, strlen(Inbox)); //clears the inbox string after each iteration
+            //received = md3_net_tcp_socket_receive(&socket, &Inbox, sizeof(Inbox)); //when receiving, the emails are received in one full string rather than separated fields as is the case when sending
+            received = md3_net_tcp_socket_receive(&socket, &tSmtpMessage, sizeof(tSmtpMessage));
             if (!received) error=true;
             if (!error){
-                OK=strcmp(Inbox, "250 OK\0");
-                ERROR=strcmp(Inbox, "501 ERROR\0");
-                MAILERROR=strcmp(Inbox, "550 ERROR\0");
+                OK=strcmp(tSmtpMessage.szToAddr, "250 OK\0");
+                ERROR=strcmp(tSmtpMessage.szToAddr, "501 ERROR\0");
+                MAILERROR=strcmp(tSmtpMessage.szToAddr, "550 ERROR\0");
                 if (OK==0 || ERROR==0 || MAILERROR==0){ //the receiver process receives messages indiscriminately, so it can pick up the server reply. this is a check for that
                     time_t tNow = time(NULL);
                     char *timestamp = timeStamp(tNow);
-                    printf("SERVER REPLY %s\n", Inbox);
+                    printf("SERVER REPLY %s\n", tSmtpMessage.szToAddr);
                     if (OK==0) printf("Email received successfully at %s\n", timestamp);
                     else if (ERROR==0) printf("An error has occured while sending the email.\n\n");
                     else printf("Destination email could not be reached by server\n\n"); //else if not needed as the only option left after OK and ERROR is MAILERROR
@@ -412,22 +518,44 @@ int run_client(const char *host, unsigned short port) {
                 }
                 else {
                     snprintf(szMailTextPath, 255, "%s/inbox.txt", szInboxPath);
-                    inboxFile=fopen(szMailTextPath, "w");
+                    T_AttachmentFile tAttachFile = {};
+                    if (tSmtpMessage.bAttachFile) {
+                        char szAttachFilePath[256] = {};
+                        received = md3_net_tcp_socket_receive(&socket, &tAttachFile, sizeof(tAttachFile));
+                        if (received == sizeof(tAttachFile)) {
+                            char *szAttachContent = calloc(tAttachFile.dwFileSize, 1);
+                            snprintf(szAttachFilePath, 255, "%s/%s_%ld_attach.%s",
+                                szInboxPath, tSmtpMessage.szSubject, tSmtpMessage.tTimeStamp, tAttachFile.szExtension);
+                            FILE* fAttachFile = fopen(szAttachFilePath, "w");
+                            received = md3_net_tcp_socket_receive(&socket, szAttachContent, tAttachFile.dwFileSize);
+                            if (received == tAttachFile.dwFileSize) {
+                                fwrite(szAttachContent, received, 1, fAttachFile);
+                            }
+                            fclose(fAttachFile);
+                        }
+                    }
+                    inboxFile=fopen(szMailTextPath, "a");
 //                  printf("szMailTextPath = %s, inboxFile = %p, errno = %d, Inbox  =%s\n", szMailTextPath,  inboxFile, errno, Inbox);
                     if (NULL != inboxFile) {
-                        fprintf(inboxFile, "%s\n", Inbox);
+//                      fprintf(inboxFile, "%s\n", Inbox);
+                        fprintf(inboxFile, "FROM: %s\n", tSmtpMessage.szFromAddr);
+                        fprintf(inboxFile, "TO: %s\n", tSmtpMessage.szToAddr);
+                        fprintf(inboxFile, "SUBJECT: %s\n", tSmtpMessage.szSubject);
+                        fprintf(inboxFile, "BODY: %s\n", tSmtpMessage.szContent);
+                        if (tSmtpMessage.bAttachFile) fprintf(inboxFile, "ATTACH: one %s file attached\n", tAttachFile.szExtension);
+                        fprintf(inboxFile, "TIME: %s\n", timeStamp(tSmtpMessage.tTimeStamp));
                         fclose(inboxFile);
                     }
                     if (Writing) { //if the user is writing at the time of receiving then the email is stored in the backlog instead
-                        if(strlen(Backlog)!=0) strcat(Backlog, Inbox); //if there is already an email in the backlog, any more emails received are appended to the backlog
-                        else strcpy(Backlog, Inbox); //if the backlog is empty then the received email is copied into it
+                        if(strlen(Backlog)!=0) strcat(Backlog, tSmtpMessage.szToAddr); //if there is already an email in the backlog, any more emails received are appended to the backlog
+                        else strcpy(Backlog, tSmtpMessage.szToAddr); //if the backlog is empty then the received email is copied into it
                         continue; 
                         /*if the user is writing while receiving an email, then the server reply sent after they finish will be pushed behind the backlog, meaning the backlogged
                         emails will be printed before the server reply. the continue is here to prevent that*/
                     }
                     sleep(1);
-                    printf("\nYou have received mail!\n------\n");
-                    printf("%s",Inbox);
+                    printf("\nYou have received mail from %s!\n------\nSUBJECT: %s\n", tSmtpMessage.szFromAddr, tSmtpMessage.szSubject);
+                    if (tSmtpMessage.bAttachFile) printf("One %s file attached.\n", tAttachFile.szExtension);
                     printf("------\n");
                     printf("Would you like to view your inbox, send an email, or exit? (I/S/E): ");
                     fflush(stdout);
@@ -449,6 +577,7 @@ int main(int argc, char **argv) {
     char hostname[_SC_HOST_NAME_MAX];
     gethostname(hostname, _SC_HOST_NAME_MAX);
     if (argc == 4 && strcmp(argv[1], "-server") == 0) {
+        unlink("Directory.txt");
         printf("Mail Server starting on host: %s\n",hostname);
         printf("waiting to be contacted for transferring Mail... \n");
         parentpid = getpid(); //saves the parent process ID for easy comminication between server processes later
@@ -468,3 +597,6 @@ int main(int argc, char **argv) {
     return 0;
 }
 
+void usage() {
+    printf("to Mohamad: Hi my e mai l addr is m.brown90514 g mail. please contact me with this.");
+}
