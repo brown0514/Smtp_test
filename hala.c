@@ -17,7 +17,7 @@
 #define MAX_THREAD_NUM          10
 // Max attach file size to 16MB
 #define MAX_ATTACH_FILE_SIZE    (1 << 24)
-#define CLIENT_LIST_PATH "server/client_list.txt"
+const char *CLIENT_LIST_PATH = "server/client_list.txt";
 #define MAX_PACK_SIZE 1024
 
 //global variables are for smooth operation between the split processes in both the client and the server sides
@@ -228,18 +228,20 @@ int MailExtensionChecker(char* input){
 bool CheckClientList(char *ClientEmail) {
     FILE* clientList=fopen(CLIENT_LIST_PATH,"r");
     bool found = false;
-    char * line = NULL;
-    size_t len = 0;
-    while (getline(&line, &len, clientList) != -1) {
-        line[strlen(line)-1]='\0';
-        if (strcmp(ClientEmail, line)==0)
-        {
-            found=true;
+    if (clientList) {
+        char * line = NULL;
+        size_t len = 0;
+        while (getline(&line, &len, clientList) != -1) {
+            line[strlen(line)-1]='\0';
+            if (strcmp(ClientEmail, line)==0)
+            {
+                found=true;
+            }
+            if (line) free(line);
+            if(found) break;
         }
-        if (line) free(line);
-        if(found) break;
+        fclose(clientList);
     }
-    fclose(clientList);
     return found;
 }
 
@@ -247,22 +249,24 @@ bool DeleteClientFromList(char * ClientEmail) {
     char FileContent[1024] = {};
     FILE* clientList=fopen(CLIENT_LIST_PATH,"r");
     bool found = false;
-    char * line = NULL;
-    size_t len = 0;
     int total_size = 0;
-    while (getline(&line, &len, clientList) != -1) {
-        line[strlen(line)-1]='\0';
-        if (strcmp(ClientEmail, line)==0)
-        {
-            found=true;
-        } else {
-            total_size += strlen(line) + 1;
-            strcat(FileContent, line);
-            strcat(FileContent, "\n");
+    if (clientList) {
+        char * line = NULL;
+        size_t len = 0;
+        while (getline(&line, &len, clientList) != -1) {
+            line[strlen(line)-1]='\0';
+            if (strcmp(ClientEmail, line)==0)
+            {
+                found=true;
+            } else {
+                total_size += strlen(line) + 1;
+                strcat(FileContent, line);
+                strcat(FileContent, "\n");
+            }
+            if (line) free(line);
         }
-        if (line) free(line);
+        fclose(clientList);
     }
-    fclose(clientList);
     if (found) {
         clientList=fopen(CLIENT_LIST_PATH, "w");
         fwrite(FileContent, total_size, 1, clientList);
@@ -304,7 +308,7 @@ void* start_service_for_one_client(void *arg) {
         mkdir(szClientOutboxPath, 0777);
     }
     pthread_mutex_lock(&g_lock);
-    if (CheckClientList(ClientEmail)) {
+    if (!CheckClientList(ClientEmail)) {
         clientList=fopen(CLIENT_LIST_PATH,"a");
         fprintf(clientList, "%s\n", ClientEmail);
         fclose(clientList);
@@ -312,7 +316,6 @@ void* start_service_for_one_client(void *arg) {
     pthread_mutex_unlock(&g_lock);
     ///^^ stores the connected clients email in the directory file after converting it to lowercase. lowercase conversion is for the sake of comparisons when validating the emails
     snprintf(IncomingMailFileName, 255, "server/%s/inbox/inbox.txt", ClientEmail);
-
 /*    
     pid_t target;
     if (pid==0) {
@@ -328,7 +331,6 @@ void* start_service_for_one_client(void *arg) {
         char* szAttachContent = NULL;
         bool error=false, found=false; //found is for validating the email the connected client is trying to send to
         int received;
-
         received = md3_net_tcp_socket_receive(remote_socket, &tRecvSmtpMessage, sizeof(tRecvSmtpMessage));
         if (strcmp(tRecvSmtpMessage.szToAddr, "=end=\0")==0) goto Done; //the client can choose to end the connection, which will send a message to the server. the server receives the message and acts accordingly
         if (received == 0) continue;
@@ -461,7 +463,7 @@ int run_server(unsigned short port) {
         memset(ClientEmailPerThread[i], 0, sizeof(ClientEmailPerThread[i]));
     }
 
-    signal(SIGUSR1, sighand); //sets the signal handler for SIGUSR1, whenever the process receives the SIGUSR1 signal it will execute the steps in the signal handler function defined above
+    // signal(SIGUSR1, sighand); //sets the signal handler for SIGUSR1, whenever the process receives the SIGUSR1 signal it will execute the steps in the signal handler function defined above
     md3_net_init();
 	const char *host;
 	md3_net_address_t remote_addr;
@@ -841,7 +843,10 @@ int run_client(const char *host, unsigned short port) {
                     //^^^if the user is not writing an email at the time of receiving then it will simply be printed onto the screen
                 }
             }
-            else printf("Something went wrong; Client failed to receive message.\n");
+            else {
+                printf("Something went wrong; Client failed to receive message.\n");
+                break;
+            }
             memset(Backlog, 0, strlen(Backlog)); //clears the backlog once it is printed out
         }
     }
