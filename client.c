@@ -1056,24 +1056,15 @@ int run_client(const char *host, unsigned short port) {
 int main(int argc, char **argv) {
     char hostname[_SC_HOST_NAME_MAX];
     gethostname(hostname, _SC_HOST_NAME_MAX);
-    if (argc == 3 && strcmp(argv[1], "-server") == 0) {
-        unlink("Directory.txt");
-        printf("Mail Server starting on host: %s\n",hostname);
-        printf("waiting to be contacted for transferring Mail... \n");
-        return run_server((unsigned short) atoi(argv[2]));
-//      parentpid = getpid(); //saves the parent process ID for easy comminication between server processes later
-//      pid=fork(); //splits the server process into two, with each one connecting to a different client
-//      if (pid==0) return run_server((unsigned short) atoi(argv[3]));
-//      else return run_server((unsigned short) atoi(argv[2]));
-    } else if (argc == 3 && strcmp(argv[1], "-client") == 0) {
+    if (argc == 2) {
         char szServerAddr[_SC_HOST_NAME_MAX];
         printf("Mail Client starting on host: %s \nType ip address of the mail server: ",hostname);
         fgets(szServerAddr, _SC_HOST_NAME_MAX, stdin);
         szServerAddr[strlen(szServerAddr)-1]='\0';
-        return run_client(szServerAddr, (unsigned short) atoi(argv[2]));
+        return run_client(szServerAddr, (unsigned short) atoi(argv[1]));
     }
 
-    printf("Usage: hala -server port1 \nor hala -client port\n");
+    printf("Usage: ./client port\n");
 
     return 0;
 }
