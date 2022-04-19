@@ -182,7 +182,7 @@ void send_to_server(md3_net_socket_t *socket, T_SmtpMessage *tSmtpMessage, char 
     }
     if (tSmtpMessage->dwAttachFileSize && szAttachFileContent) {
         if (0 == SocketFileSend(socket, szAttachFileContent, tSmtpMessage->dwAttachFileSize)) {
-            printf("\n   And an attach file has been sent to the server.\n");
+            printf("   And an attach file has been sent to the server.\n");
         }
         free(szAttachFileContent);
     }
@@ -692,7 +692,7 @@ int run_client(const char *host, unsigned short port) {
 
                 time_t tTimeStamp = time(NULL);
                 tSmtpMessage.tTimeStamp = tTimeStamp;
-                snprintf(szMailTextPath, 255, "%s/%s_%ld.txt", szOutboxPath, tSmtpMessage.szSubject, tTimeStamp);
+                snprintf(szMailTextPath, 255, "%s/sent.txt", szOutboxPath);
 
                 char szAttachFilePath[256] = {};
                 FILE* fAttachFile = NULL;
@@ -886,7 +886,7 @@ int run_client(const char *host, unsigned short port) {
                         if (NULL != outboxFile) {
                             char *p = szNewInboxContent;
                             int tot_sz = 0;
-                            while(1 == fread(&tSmtpMessage, sizeof(tSmtpMessage), 1, inboxFile)) {
+                            while(1 == fread(&tSmtpMessage, sizeof(tSmtpMessage), 1, outboxFile)) {
                                 printf("Mail No. %d\n", ++ mail_count);
                                 print(&tSmtpMessage, 1);
                                 tSmtpMessage.readFlag = 1;
@@ -925,7 +925,7 @@ int run_client(const char *host, unsigned short port) {
                     scanf("%c", &yn);
                     getchar();
                     if (yn == 'Y' || yn == 'y') {
-                        if (p->dwAttachFileSize) {
+                        if (p->dwAttachFileSize && p->dwAttachFileSize < MAX_ATTACH_FILE_SIZE) {
                             char *szAttachFileContent = calloc(p->dwAttachFileSize, 1);
                             char szAttachFilePath[256] = {};
                             char *src;
@@ -941,11 +941,11 @@ int run_client(const char *host, unsigned short port) {
                             }
                             p->tTimeStamp = time(NULL);
                             send_to_server(&socket, p, szAttachFileContent);
-                            free(szAttachFileContent);
                         } else {
                             p->tTimeStamp = time(NULL);
                             send_to_server(&socket, p, NULL);
                         }
+                        sleep(1);
                     }
                     break;
                 }
@@ -1012,6 +1012,7 @@ int run_client(const char *host, unsigned short port) {
                     }
                     
                     inboxFile=fopen(szMailTextPath, "a");
+                    // print(&tSmtpMessage, 1); // for test
                     if (inboxFile != NULL) {
                         fwrite(&tSmtpMessage, sizeof(tSmtpMessage), 1, inboxFile);
                         fclose(inboxFile);
